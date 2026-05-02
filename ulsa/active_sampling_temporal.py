@@ -358,6 +358,8 @@ def load_mat_beamformed(
         data = f["bfr"][()]
         complex_data = data["real"] + 1j * data["imag"]
 
+    complex_data = np.ascontiguousarray(complex_data, dtype=np.complex64)
+    complex_data = np.nan_to_num(complex_data, nan=0.0)
     bmodes = 20.0 * np.log10(np.abs(complex_data) + 1e-12)
     bmodes -= bmodes.max()
     # (n_frames, n_scanlines, n_samples) -> (n_frames, n_samples, n_scanlines)
