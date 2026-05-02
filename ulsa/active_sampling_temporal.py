@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import h5py
 import jax
 import keras
 import numpy as np
@@ -337,6 +338,36 @@ def run_active_sampling(
         return agent_results, timer.timings["perception_action_step"]
 
 
+def load_mat_beamformed(
+    file_path,
+    n_frames="all",
+    dynamic_range=(-60, 0),
+):
+    """Load beamformed complex data from a Matlab v7.3 (.mat / HDF5) file.
+
+    The file is expected to contain a `bfr` dataset with `real` and `imag`
+    fields, of shape (n_frames, n_scanlines, n_samples). The complex data is
+    converted to B-mode (envelope detection + log compression in dB),
+    normalized so 0 dB corresponds to the brightest sample, transposed so the
+    sample (depth) axis is the image height, and clipped to `dynamic_range`.
+
+    Returns:
+        bmodes: float32 array of shape (n_frames, n_samples, n_scanlines).
+    """
+    with h5py.File(file_path, "r") as f:
+        data = f["bfr"][()]
+        complex_data = data["real"] + 1j * data["imag"]
+
+    bmodes = 20.0 * np.log10(np.abs(complex_data) + 1e-12)
+    bmodes -= bmodes.max()
+    # (n_frames, n_scanlines, n_samples) -> (n_frames, n_samples, n_scanlines)
+    bmodes = np.transpose(bmodes, (0, 2, 1))
+    if isinstance(n_frames, int):
+        bmodes = bmodes[:n_frames]
+    bmodes = np.clip(bmodes, dynamic_range[0], dynamic_range[1])
+    return bmodes.astype(np.float32)
+
+
 def preload_data(
     file: File,
     n_frames: int,  # if there are less than n_frames, it will load all frames
@@ -433,11 +464,24 @@ def active_sampling_single_file(
     dynamic_range = image_range
 
     dataset_path = target_sequence.format(data_root=data_root)
-    with File(dataset_path) as file:
-        n_frames = agent_config.io_config.get("frame_cutoff", "all")
-        validation_sample_frames, scan = preload_data(file, n_frames, data_type)
+    n_frames = agent_config.io_config.get("frame_cutoff", "all")
+
+    if str(dataset_path).endswith(".mat"):
+        log.info(
+            log.blue(f"Loading beamformed data from .mat file: {dataset_path}")
+        )
+        data_type = "data/image"
+        validation_sample_frames = load_mat_beamformed(
+            dataset_path, n_frames, dynamic_range
+        )
+        scan = Scan(n_tx=1)
         scan.dynamic_range = dynamic_range
         agent_config.action_selection.set_n_tx(scan.n_tx)
+    else:
+        with File(dataset_path) as file:
+            validation_sample_frames, scan = preload_data(file, n_frames, data_type)
+            scan.dynamic_range = dynamic_range
+            agent_config.action_selection.set_n_tx(scan.n_tx)
 
     if getattr(scan, "theta_range", None) is not None:
         theta_range_deg = np.rad2deg(scan.theta_range)
